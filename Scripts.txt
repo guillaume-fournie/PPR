@@ -1,0 +1,888 @@
+
+## Below:
+## R functions - to generate a particle, calculate particle weight, compute the distances based a stochastic simulation output
+## C script - meta-population model of PPRV transmission
+
+
+
+#####################################################################################
+
+## Generating a particle
+## if first sequence: sample from the prior
+## if sequence>1: sample from previous sequence and perturbation
+## Note that all prior distributions and perturbation kernels are uniform
+## ABCSeq: sequence of the ABC-SMC algorithm
+## List_prec: list object, each element corresponds to a parameter: vector with values of a given parameter for each particle of ABC-SMC sequence ABCSeq-1
+## FactorKernel: Peturbation kernel intensity
+## ListParWeight_prec: vector object, weights of the particles of the ABC-SMC sequence ABCSeq-1
+## MinVec: vector with the lower bound of the prior distribution for each parameter
+## MaxVec: vector with the upper bound of the prior distribution for each parameter
+
+## We should have:
+## Parameters <- c("BetaW_L","BetaW_H","BetaB_LL","BetaB_LH","BetaB_HH")
+## names(List_prec) <- Parameters
+## names(MinVec) <- Parameters
+## names(MaxVec) <- Parameters
+
+Particle <- function(
+ABCSeq,
+List_prec,
+FactorKernel,
+ListParWeight_prec,
+MinVec,
+MaxVec){
+
+Parameters <- c("BetaW_L","BetaW_H","BetaB_LL","BetaB_LH","BetaB_HH")
+vParticle <- vector(length=length(Parameters))
+names(vParticle) <- Parameters
+
+if(ABCSeq==1){
+
+	for(Par in Parameters){
+		vParticle[Par] <- runif(1,min=MinVec[Par],max=MaxVec[Par])
+	}
+
+}
+
+if(ABCSeq>1){
+
+	## Perturbation: repeat until the prior probability of the particle is > 0
+	repeat{
+
+		## Sample a particle from the former sequence
+		SamplPart <- sample(1:length(ListParWeight_prec),1,prob=ListParWeight_prec)
+
+		Ind <- 1
+		for(Par in Parameters){
+			Range <- max(List_prec[[Par]]) - min(List_prec[[Par]])
+			Value <- List_prec[[Par]][SamplPart]
+			vParticle[Par] <- runif(1 , min = Value - FactorKernel * Range , max = Value + FactorKernel * Range)
+			Ind <- Ind * (vParticle[Par]>=MinVec[Par] & vParticle[Par]<=MaxVec[Par])
+		}
+		if(Ind==1){ break }
+
+	}
+
+	vParticle
+
+}
+
+#####################################################################################
+
+
+
+
+
+
+#####################################################################################
+
+## Calculate the particle weights
+## Note that all prior distributions and perturbation kernels are uniform
+## ABCSeq: sequence of the ABC-SMC algorithm
+## NumberParticles: number of particles
+## List_prec: list object, each element corresponds to a parameter: vector with values of a given parameter for each particle of ABC-SMC sequence ABCSeq-1
+## List_new : list object, each element corresponds to a parameter: vector with values of a given parameter for each particle of ABC-SMC sequence ABCSeq
+## FactorKernel: Peturbation kernel intensity
+## ListParWeight_prec: vector object, weights of the particles of the ABC-SMC sequence ABCSeq-1
+
+## We should have:
+## Parameters <- c("BetaW_L","BetaW_H","BetaB_LL","BetaB_LH","BetaB_HH")
+## names(List_prec) <- Parameters
+## names(List_new)  <- Parameters
+
+Weights_function <- function(
+ABCSeq,
+NumberParticles,
+List_prec,
+List_new,
+FactorKernel,
+ListParWeight_prec){
+
+Parameters <- c("BetaW_L","BetaW_H","BetaB_LL","BetaB_LH","BetaB_HH")
+ListParWeight <- vector(length=NumberParticles)
+
+if(ABCSeq==1){
+
+	ListParWeight[] <- 1
+
+}
+
+if(ABCSeq>1){
+
+	## Pertubation kernel bounds
+	List_Range_min <- vector(length=length(Parameters),mode="list")
+	List_Range_max <- vector(length=length(Parameters),mode="list")
+	names(List_Range_min) <- Parameters
+	names(List_Range_max) <- Parameters
+
+	for(Par in Parameters){
+		Range <- max(List_prec[[Par]]) - min(List_prec[[Par]])
+
+		List_Range_min[[Par]] <- List_prec[[Par]] - FactorKernel * Range
+		List_Range_max[[Par]] <- List_prec[[Par]] + FactorKernel * Range
+	}
+
+	## Screen each new particle - to identify the particles of ABCSeq-1 which could have generated a particle i at sequence ABCSeq 
+	for(i in 1:length(ListParWeight)){
+		v <- rep(0,NumberParticles)
+		for(Par in Parameters){
+			v <- v + (List_new[[Par]][i]>=List_Range_min[[Par]] & List_new[[Par]][i]<=List_Range_max[[Par]])
+		}
+		vec <- v==length(Parameters)
+		ListParWeight[i] = 1 / sum(ListParWeight_prec * vec)
+	}
+
+}
+
+## Normalise weights
+ListParWeight = ListParWeight/sum(ListParWeight)
+
+ListParWeight
+
+}
+
+#####################################################################################
+
+
+
+
+
+###########################################################################################################
+
+## Computing distances d1 and d2
+## vSampl_R: vector object, each element is the simulated number of immune adults in a randomly selected village (ouput of the C script).
+## vSampl_N: vector object, each element is the simulated number of adults in a randomly selected village (ouput of the C script).
+## List_SamplAnim: list object, each element corresponds to a given kebele. Each element is a vector with the numbers of animals sampled during the 1999 survey in villages of the given kebele.
+## vKeb: vector object, each element is the number of villages selected in a given kebele during the 1999 survey.
+## vObs: vector object, each element is the observed number of kebele falling in each seroprevalence range.
+## PrevObs: the observed number of positive animals.
+## Se: ELISA test sensitivity.
+## Sp: ELISA test specificity.
+
+Distances <- function(
+vSampl_R, vSampl_N,
+List_SamplAnim,
+vKeb,
+vObs,PrevObs,Se,Sp){
+
+vSero <- NULL # object in each the simulated seroprevalence in each kebele will be stored
+
+## Step 2 - setting indeces
+new_k <- 1
+new_v <- 1
+new_i <- 1
+totP <- 0
+
+repeat{
+
+	k <- new_k
+	v <- new_v
+	i <- new_i
+
+	## Step 3 - Note that the random selection of villages was simulated in the C script
+
+	## Step 4
+	SamplAnim <- List_SamplAnim[[k]][v]
+	Immune <- rhyper(1,vSampl_R[i],vSampl_N[i]-vSampl_R[i],SamplAnim)
+
+	## Step 5
+	Positives <- rbinom(1,Immune,Se) + rbinom(1,SamplAnim-Immune,1-Sp)
+
+	## Step 6
+	if(v==1){ T <- SamplAnim     ; P <- Positives }
+	if(v>1 ){ T <- T + SamplAnim ; P <- P + Positives }
+	totP <- totP + Positives
+
+	## Step 7 - Note that the random selection of villages was simulated in the C script
+	new_i <- i + 1
+
+	## Step 8
+	if(v==vKeb[k]){
+		vSero <- c(vSero,P/T) ; new_k <- k+1 ; new_v <- 1 
+	} else {
+		new_v <- v+1 
+	}
+
+	## Step 9
+	if(k==length(vKeb) & v==vKeb[k]){ break }
+
+}
+
+## Step 10
+vCat <- c( sum(vSero<0.05) , 
+sum(vSero>=0.05 & vSero<0.1) , 
+sum(vSero>=0.1  & vSero<0.2) , 
+sum(vSero>=0.2  & vSero<0.3) , 
+sum(vSero>=0.3  & vSero<0.4) , 
+sum(vSero>=0.4  & vSero<0.5) , 
+sum(vSero>=0.5) )
+
+## Add 1 to each bin
+vCat <- vCat + 1
+vObs <- vObs + 1
+
+## Proportions
+pCat <- vCat/sum(vCat)
+pObs <- vObs/sum(vObs)
+
+d1 <- abs(PrevObs-totP)/PrevObs
+d2 <- sum( pCat * log( pCat / pObs ) + pObs * log( pObs / pCat ) )
+
+vecRes <- c(d1,d2)
+names(vecRes) <- c("d1","d2")
+
+vecRes
+
+}
+
+###########################################################################################################
+
+
+
+
+
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+
+
+
+// C script - meta-population model of PPRV transmission
+
+/*
+ * PPR transmission model
+ *
+ *  Created on: 5 April 2018
+ *      Author: Guillaume Fournié (gfournie@rvc.ac.uk)
+ */
+
+
+
+#include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
+#include <gsl/gsl_rng.h>
+#include <gsl/gsl_randist.h>
+#include <R.h>
+
+
+void foPPR(
+		int *Freq_ReIntr_T , // Frequency of viral incursion in villages
+		int *TimeLimit_ReIntr_T , // Number of timesteps behind which there are no more viral incursions in villages
+		int *nSeeds_T , // Number of villages in which PPR is introduced (in each region)
+		int *nAreas_L , // Number of villages in lowlands
+		int *nAreas_H , // Number of villages in highlands
+		double *nAnim_L_T , // Number of animals in lowland villages
+		double *nAnim_H_T , // Number of animals in highland villages
+		double *NInfSeededArea_T , // number of seeds in each infected village
+		double *MinNoI_T , // minimum number of infected animals in each village
+		double *MinNoR_T , // minimum number of recovered animals in each village
+		double *PropAge_1_T , // proportion of young
+		double *PropAge_2_T , // proportion of adults	
+		int *nSamplVillT_L , // Number of sampled lowland villages
+		int *nSamplVillT_H , // Number of sampled highland villages
+		int *nTsp_T , // Number of timesteps
+		double *nBirths_L_T , // Number of births - absence of disease (lowlands)
+		double *nBirths_H_T , // Number of births - absence of disease (highlands)
+		double *Exit_1_T , // Exit rate - Young animals leaving the population
+		double *Exit_2_T , // Exit rate - Adult animals leaving the population
+		double *Age_r_T , // Young animals ageing (and becoming adults)
+		double *Mort_PPR_T , // PPR case fatality rate
+		double *SeedRdNo ,	// setting the generation of random numbers
+		double *BetaW_L_T , 
+		double *BetaW_H_T , 
+		double *BetaB_LL_T , 
+		double *BetaB_LH_T , 
+		double *BetaB_HL_T , 
+		double *BetaB_HH_T , 
+	   double *vSampl_L_R, // Vector of length: nSamplVillT_L; will return the number of recovered adults in each selected lowland village
+	   double *vSampl_L_N, // Vector of length: nSamplVillT_L; will return the number of adults in each selected lowland village
+	   double *vSampl_H_R, // Vector of length: nSamplVillT_H; will return the number of recovered adults in each selected highland village
+	   double *vSampl_H_N  // Vector of length: nSamplVillT_H; will return the number of adults in each selected highland village
+){
+	
+	
+	
+// Frequency of viral incursion in villages
+int Freq_ReIntr = *Freq_ReIntr_T ;
+
+// Number of timesteps behind which there are no more viral incursions in villages
+int TimeLimit_ReIntr = *TimeLimit_ReIntr_T ;
+
+// Number of villages in which PPR is introduced (in each region)
+int nSeeds = *nSeeds_T ;
+
+// Number of villages in lowlands and highlands
+int nL = *nAreas_L ;
+int nH = *nAreas_H ;
+
+// Number of animals in lowland and highland villages
+double nAnim_L = *nAnim_L_T ;
+double nAnim_H = *nAnim_H_T ;
+
+// number of seeds in each village
+double NInfSeededArea = *NInfSeededArea_T ;
+
+// minimum number of infected/recovered animals in each village
+double MinNoI = *MinNoI_T ;
+double MinNoR = *MinNoR_T ;
+
+// proportion of animals in each age compartment
+double PropAge_1 = *PropAge_1_T ;
+double PropAge_2 = *PropAge_2_T  ;
+
+// Number of sampled lowland and highland villages
+int nSamplVill_L = *nSamplVillT_L ;
+int nSamplVill_H = *nSamplVillT_H ;
+
+// Number of timesteps
+int nTsp = *nTsp_T ;
+
+// Number of births - absence of disease
+double nBirths_L = *nBirths_L_T ; 
+double nBirths_H = *nBirths_H_T ; 
+	
+// Young and adult animals leaving the population
+double Exit_1 = *Exit_1_T ; 
+double Exit_2 = *Exit_2_T ; 
+
+// Young and adult animals staying in the population
+double Remain_1 = 1-Exit_1 ;
+double Remain_2 = 1-Exit_2 ;
+
+// Young animals ageing
+double Age_r = *Age_r_T ;
+
+// PPR case fatality rate
+double Mort_PPR = *Mort_PPR_T ;
+
+// Survival after infection
+double Surv_PPR = 1 - Mort_PPR ;
+
+// Transmission parameters
+double BetaW_L = *BetaW_L_T ;
+double BetaW_H = *BetaW_H_T ;
+
+double BetaB_LL = *BetaB_LL_T ;
+double BetaB_LH = *BetaB_LH_T ;
+double BetaB_HL = *BetaB_HL_T ;
+double BetaB_HH = *BetaB_HH_T ;
+
+// setting the generation of random numbers
+double sRdNo = *SeedRdNo ;
+gsl_rng * r = gsl_rng_alloc (gsl_rng_mt19937) ;
+gsl_rng_set(r,sRdNo) ;
+
+
+//*******************************************************************************************************************************//
+//*******************************************************************************************************************************//
+//*******************************************************************************************************************************//
+//*******************************************************************************************************************************//
+//*******************************************************************************************************************************//
+
+
+double S_1_L[nL]; double S_2_L[nL];
+double I_1_L[nL]; double I_2_L[nL];
+double R_1_L[nL]; double R_2_L[nL];
+
+double S_1_H[nH]; double S_2_H[nH];
+double I_1_H[nH]; double I_2_H[nH];
+double R_1_H[nH]; double R_2_H[nH];
+	
+	
+double pS_1 ; double pS_2 ;
+double pI_1 ; double pI_2 ;
+double pR_1 ; double pR_2 ;
+
+double aS_1 ; double aS_2 ;
+double aI_1 ; double aI_2 ;
+double aR_1 ; double aR_2 ;
+
+double Age_S_1 ;
+double Age_I_1 ;
+double Age_R_1 ;
+
+double nS_Temp ;
+double nI_Temp ;
+double nR_Temp ;
+double nN_Temp ;
+
+double RiskInf ;
+double RiskInf_Bet ;
+
+double NewInf_1 ;
+double NewInf_2 ;
+
+double Births ;
+
+
+double PrevI ;
+double NewI ;
+int Decrease_L[nL] ;
+int Decrease_H[nH] ;
+int Increase_L[nL] ;
+int Increase_H[nH] ;
+
+for(int a=0;a<nL;a++)
+{
+	Decrease_L[a] = 0 ;
+	Increase_L[a] = 0 ;
+}
+
+for(int a=0;a<nH;a++)
+{
+	Decrease_H[a] = 0 ;
+	Increase_H[a] = 0 ;
+}
+
+	
+// ID of areas (0 to n-1)
+int ID_Areas_L[nL] ;
+for(int i=0;i<nL;i++){ ID_Areas_L[i] = i ; }
+int ID_Areas_H[nH] ;
+for(int i=0;i<nH;i++){ ID_Areas_H[i] = i ; }
+
+	
+//*******************************************************************************************************************************//
+//*******************************************************************************************************************************//
+//*******************************************************************************************************************************//
+//*******************************************************************************************************************************//
+	
+	
+// START: Allocating animals to each village and age category
+double PopVill_1_L = nAnim_L * PropAge_1 ;
+double PopVill_2_L = nAnim_L * PropAge_2 ;
+
+double PopVill_1_H = nAnim_H * PropAge_1 ;
+double PopVill_2_H = nAnim_H * PropAge_2 ;
+
+// Initialising SIR vectors
+for(int i=0;i<nL;i++)
+{
+	S_1_L[i] = PopVill_1_L ;
+	S_2_L[i] = PopVill_2_L ;
+
+	I_1_L[i] = 0 ;
+	I_2_L[i] = 0 ;
+	   
+	R_1_L[i] = 0 ;
+	R_2_L[i] = 0 ;
+}
+
+for(int i=0;i<nH;i++)
+{
+	S_1_H[i] = PopVill_1_H ;
+	S_2_H[i] = PopVill_2_H ;
+
+	I_1_H[i] = 0 ;
+	I_2_H[i] = 0 ;
+		   
+	R_1_H[i] = 0 ;
+	R_2_H[i] = 0 ;
+}
+	
+
+	
+// START: Seeding the infection
+for(int i=0;i<nSeeds;i++)
+{
+	S_2_L[i] = S_2_L[i] - NInfSeededArea ;
+	S_2_H[i] = S_2_H[i] - NInfSeededArea ;
+	I_2_L[i] = NInfSeededArea ;
+	I_2_H[i] = NInfSeededArea ;
+}
+// END: Seeding the infection
+
+	
+// START: Timestep loop
+for(int Tsp=0;Tsp<nTsp;Tsp++)
+{
+
+	// Re-introduction of infection
+	if((Tsp+1)%Freq_ReIntr==0 && Tsp<TimeLimit_ReIntr)
+	{
+
+		int Vill_notInfected_L = 0 ;
+		for(int a=0;a<nL;a++)
+		{
+			if(I_1_L[a]+I_2_L[a]>0)
+			{
+				
+			} else {
+				Vill_notInfected_L += 1 ;
+			}
+		}
+
+		int vNotInfectedVill_L[Vill_notInfected_L] ;
+		int Index_InfVill_L = 0 ;
+		for(int a=0;a<nL;a++)
+		{
+			if(I_1_L[a]+I_2_L[a]>0)
+			{
+					
+			} else {
+				vNotInfectedVill_L[Index_InfVill_L] = a ;
+				Index_InfVill_L += 1 ;
+			}
+		}
+		
+		int VillReSeeded_L = nSeeds ;
+		if(Vill_notInfected_L<nSeeds)
+		{
+			VillReSeeded_L = Vill_notInfected_L ;
+		}
+		for(int i=0;i<VillReSeeded_L;i++)
+		{
+			int k = vNotInfectedVill_L[i] ;
+			S_2_L[k] = S_2_L[k] - NInfSeededArea ;
+			I_2_L[k] = NInfSeededArea ;
+		}
+
+		
+		
+		int Vill_notInfected_H = 0 ;
+		for(int a=0;a<nH;a++)
+		{
+			if(I_1_H[a]+I_2_H[a]>0)
+			{
+				
+			} else {
+				Vill_notInfected_H += 1 ;
+			}
+		}
+
+		int vNotInfectedVill_H[Vill_notInfected_H] ;
+		int Index_InfVill_H = 0 ;
+		for(int a=0;a<nH;a++)
+		{
+			if(I_1_H[a]+I_2_H[a]>0)
+			{
+					
+			} else {
+				vNotInfectedVill_H[Index_InfVill_H] = a ;
+				Index_InfVill_H += 1 ;
+			}
+		}
+		
+		int VillReSeeded_H = nSeeds ;
+		if(Vill_notInfected_H<nSeeds)
+		{
+			VillReSeeded_H = Vill_notInfected_H ;
+		}
+		for(int i=0;i<VillReSeeded_H;i++)
+		{
+			int k = vNotInfectedVill_H[i] ;
+			S_2_H[k] = S_2_H[k] - NInfSeededArea ;
+			I_2_H[k] = NInfSeededArea ;
+		}
+		
+	}
+	// End Condition: Re-introduction of infection
+
+
+	// Number of animals in each region at t-1
+	double pI_TOT_L = 0 ;
+	double pN_TOT_L = 0 ;
+	for(int a=0;a<nL;a++)
+	{
+		pS_1 = S_1_L[a] ;
+		pS_2 = S_2_L[a] ;
+		pI_1 = I_1_L[a] ;
+		pI_2 = I_2_L[a] ;
+		pR_1 = R_1_L[a] ;
+		pR_2 = R_2_L[a] ;
+		
+		nS_Temp = pS_1+pS_2 ;
+		nI_Temp = pI_1+pI_2 ;
+		nR_Temp = pR_1+pR_2 ;
+		nN_Temp = nS_Temp+nI_Temp+nR_Temp ;
+
+		pI_TOT_L += nI_Temp ;
+		pN_TOT_L += nN_Temp ;
+	}
+
+	double pI_TOT_H = 0 ;
+	double pN_TOT_H = 0 ;
+	for(int a=0;a<nH;a++)
+	{
+		pS_1 = S_1_H[a] ;
+		pS_2 = S_2_H[a] ;
+		pI_1 = I_1_H[a] ;
+		pI_2 = I_2_H[a] ;
+		pR_1 = R_1_H[a] ;
+		pR_2 = R_2_H[a] ;
+		
+		nS_Temp = pS_1+pS_2 ;
+		nI_Temp = pI_1+pI_2 ;
+		nR_Temp = pR_1+pR_2 ;
+		nN_Temp = nS_Temp+nI_Temp+nR_Temp ;
+
+		pI_TOT_H += nI_Temp ;
+		pN_TOT_H += nN_Temp ;
+	}
+
+	
+	
+	// Ageing and infection process
+		
+	// Lowlands
+	for(int a=0;a<nL;a++)
+	{
+		
+		pS_1 = S_1_L[a] ;
+		pS_2 = S_2_L[a] ;
+		pI_1 = I_1_L[a] ;
+		pI_2 = I_2_L[a] ;
+		pR_1 = R_1_L[a] ;
+		pR_2 = R_2_L[a] ;
+		
+		nS_Temp = pS_1+pS_2 ;
+		nI_Temp = pI_1+pI_2 ;
+		nR_Temp = pR_1+pR_2 ;
+		nN_Temp = nS_Temp+nI_Temp+nR_Temp ;
+				
+		RiskInf = 1 - exp(-BetaW_L*nI_Temp/nN_Temp) ;
+
+		aS_1    = Remain_1 * pS_1 ;
+		Age_S_1 = aS_1 * Age_r ;
+		aS_1    = aS_1 - Age_S_1 ;
+		aS_2    = Remain_2 * pS_2 + Age_S_1 ;
+
+		aI_1    = Remain_1 * pI_1 ;
+		Age_I_1 = aI_1 * Age_r ;
+		aI_1    = aI_1 - Age_I_1 ;
+		aI_2    = Remain_2 * pI_2 + Age_I_1 ;
+
+		aR_1    = Remain_1 * pR_1 ;
+		Age_R_1 = aR_1 * Age_r ;
+		aR_1    = aR_1 - Age_R_1 ;
+		aR_2    = Remain_2 * pR_2 + Age_R_1 ;
+			
+		NewInf_1 = RiskInf * aS_1 ;
+		NewInf_2 = RiskInf * aS_2 ;
+
+		aS_1 = aS_1 - NewInf_1 ;
+		aS_2 = aS_2 - NewInf_2 ;
+
+		if(nI_Temp>0)
+		{
+			Births = nBirths_L * (pS_2+pR_2) / PopVill_2_L ;
+		} else {
+			Births = nBirths_L ;
+		}
+
+		aS_1 = aS_1 + Births ;
+
+		
+		// Simulate fade out
+		PrevI = nI_Temp ;
+		NewI  = NewInf_1+NewInf_2 ;
+				
+		if(PrevI > NewI && Increase_L[a]==1 ){ Decrease_L[a] = 1 ; }
+		if(PrevI < NewI){ Increase_L[a] = 1 ; }
+			
+		if(NewI<MinNoI)
+		{
+			Decrease_L[a] = 0 ; Increase_L[a] = 0 ;
+			NewInf_1 = 0 ;
+			NewInf_2 = 0 ;
+		}
+
+		if(Increase_L[a]==1 && Decrease_L[a]==1 && PrevI<NewI)
+		{
+			Decrease_L[a] = 0 ; Increase_L[a] = 0 ;
+			NewInf_1 = 0 ;
+			NewInf_2 = 0 ;
+		}
+
+		
+		aR_1 = aR_1 + Surv_PPR * aI_1 ;
+		aR_2 = aR_2 + Surv_PPR * aI_2 ;
+
+		aI_1 = NewInf_1 ;
+		aI_2 = NewInf_2 ;
+		
+		// If there was not any infected animal, simulation of viral incursion
+		if(nI_Temp>0)
+		{
+			
+		} else {
+			RiskInf_Bet = 1 - exp( - nS_Temp * ( BetaB_LL*(pI_TOT_L-nI_Temp)/(pN_TOT_L-nN_Temp) + BetaB_HL*pI_TOT_H/pN_TOT_H ) ) ; 
+			double RandNo = gsl_rng_uniform_pos (r) ;
+			if(RiskInf_Bet>RandNo){
+				aS_2 = aS_2 - NInfSeededArea ;
+				aI_2 = NInfSeededArea ;
+			}
+		}
+			
+		S_1_L[a] = aS_1 ;
+		S_2_L[a] = aS_2 ;
+
+		I_1_L[a] = aI_1 ;
+		I_2_L[a] = aI_2 ;
+
+		if(aR_1+aR_2<MinNoR){ aR_1 = 0 ; aR_2 = 0 ; }
+
+		R_1_L[a] = aR_1 ;
+		R_2_L[a] = aR_2 ;
+
+	}
+	// end Loop Lowland villages
+		
+	
+	
+	// Highlands
+	for(int a=0;a<nH;a++)
+	{
+		
+		pS_1 = S_1_H[a] ;
+		pS_2 = S_2_H[a] ;
+		pI_1 = I_1_H[a] ;
+		pI_2 = I_2_H[a] ;
+		pR_1 = R_1_H[a] ;
+		pR_2 = R_2_H[a] ;
+		
+		nS_Temp = pS_1+pS_2 ;
+		nI_Temp = pI_1+pI_2 ;
+		nR_Temp = pR_1+pR_2 ;
+		nN_Temp = nS_Temp+nI_Temp+nR_Temp ;
+				
+		// Risk of infection
+		RiskInf = 1 - exp(-BetaW_H*nI_Temp/nN_Temp) ;
+
+		aS_1    = Remain_1 * pS_1 ;
+		Age_S_1 = aS_1 * Age_r ;
+		aS_1    = aS_1 - Age_S_1 ;
+		aS_2    = Remain_2 * pS_2 + Age_S_1 ;
+
+		aI_1    = Remain_1 * pI_1 ;
+		Age_I_1 = aI_1 * Age_r ;
+		aI_1    = aI_1 - Age_I_1 ;
+		aI_2    = Remain_2 * pI_2 + Age_I_1 ;
+
+		aR_1    = Remain_1 * pR_1 ;
+		Age_R_1 = aR_1 * Age_r ;
+		aR_1    = aR_1 - Age_R_1 ;
+		aR_2    = Remain_2 * pR_2 + Age_R_1 ;
+			
+		NewInf_1 = RiskInf * aS_1 ;
+		NewInf_2 = RiskInf * aS_2 ;
+
+		aS_1 = aS_1 - NewInf_1 ;
+		aS_2 = aS_2 - NewInf_2 ;
+
+		if(nI_Temp>0)
+		{
+			Births = nBirths_H * (pS_2+pR_2) / PopVill_2_H ;
+		} else {
+			Births = nBirths_H ;
+		}
+
+		aS_1 = aS_1 + Births ;
+
+		
+		// Simulate fade out
+		PrevI = nI_Temp ;
+		NewI  = NewInf_1+NewInf_2 ;
+				
+		if(PrevI > NewI && Increase_H[a]==1 ){ Decrease_H[a] = 1 ; }
+		if(PrevI < NewI){ Increase_H[a] = 1 ; }
+			
+		if(NewI<MinNoI)
+		{
+			Decrease_H[a] = 0 ; Increase_H[a] = 0 ;
+			NewInf_1 = 0 ;
+			NewInf_2 = 0 ;
+		}
+
+		if(Increase_H[a]==1 && Decrease_H[a]==1 && PrevI<NewI)
+		{
+			Decrease_H[a] = 0 ; Increase_H[a] = 0 ;
+			NewInf_1 = 0 ;
+			NewInf_2 = 0 ;
+		}
+
+		
+		aR_1 = aR_1 + Surv_PPR * aI_1 ;
+		aR_2 = aR_2 + Surv_PPR * aI_2 ;
+
+		aI_1 = NewInf_1 ;
+		aI_2 = NewInf_2 ;
+			
+		// If there was not any infected animal, simulation of viral incursion
+		if(nI_Temp>0)
+		{
+			
+		} else {
+			RiskInf_Bet = 1 - exp( - nS_Temp * ( BetaB_HH*(pI_TOT_H-nI_Temp)/(pN_TOT_H-nN_Temp) + BetaB_LH*pI_TOT_L/pN_TOT_L ) ) ; 
+			double RandNo = gsl_rng_uniform_pos (r) ;
+			if(RiskInf_Bet>RandNo){
+				aS_2 = aS_2 - NInfSeededArea ;
+				aI_2 = NInfSeededArea ;
+			}
+		}
+
+		S_1_H[a] = aS_1 ;
+		S_2_H[a] = aS_2 ;
+
+		I_1_H[a] = aI_1 ;
+		I_2_H[a] = aI_2 ;
+
+		if(aR_1+aR_2<MinNoR){ aR_1 = 0 ; aR_2 = 0 ; }
+
+		R_1_H[a] = aR_1 ;
+		R_2_H[a] = aR_2 ;
+
+	}
+	// end Loop Lowland villages
+		
+}
+// END: Timestep loop
+
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////
+
+int nID ;
+
+// Lowlands
+// vector with the indeces of the villages to be sampled
+int vVSampl_L[nSamplVill_L] ;
+gsl_ran_choose(r, vVSampl_L, nSamplVill_L, ID_Areas_L, nL, sizeof (int)) ;
+
+for(int i=0;i<nSamplVill_L;i++)
+{
+	nID = vVSampl_L[i] ;
+		
+	vSampl_L_N[i] = (int)round(S_2_L[nID]+I_2_L[nID]+R_2_L[nID]) ;
+	vSampl_L_R[i] = (int)round(R_2_L[nID]) ;
+}
+
+
+// Highlands
+// vector with the indeces of the villages to be sampled
+int vVSampl_H[nSamplVill_H] ;
+gsl_ran_choose(r, vVSampl_H, nSamplVill_H, ID_Areas_H, nH, sizeof (int)) ;
+
+for(int i=0;i<nSamplVill_H;i++)
+{
+	nID = vVSampl_H[i] ;
+		
+	vSampl_H_N[i] = (int)round(S_2_H[nID]+I_2_H[nID]+R_2_H[nID]) ;
+	vSampl_H_R[i] = (int)round(R_2_H[nID]) ;
+}
+
+
+}
+// end function
+
